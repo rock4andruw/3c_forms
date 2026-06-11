@@ -1,27 +1,7 @@
-import os
 import io
 import csv
 import datetime
 import streamlit as st
-
-# ── Secrets（本地 .env 或 Streamlit Cloud secrets） ────────────────────────
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
-def _secret(key: str) -> str:
-    return os.environ.get(key) or st.secrets.get(key, "")
-
-# ── Supabase ───────────────────────────────────────────────────────────────
-from supabase import create_client, Client
-
-@st.cache_resource
-def get_supabase() -> Client:
-    return create_client(_secret("SUPABASE_URL"), _secret("SUPABASE_KEY"))
-
-supabase = get_supabase()
 
 # ── 常數 ───────────────────────────────────────────────────────────────────
 
@@ -45,19 +25,12 @@ BACKGROUNDS = [
 # ── 計算 ───────────────────────────────────────────────────────────────────
 
 def calc_overall(scores: dict) -> float:
-    perf_adj = 10 - scores["performance"]   # 反向
+    perf_adj = 10 - scores["performance"]   # 反向計分
     total = (scores["mental"] + scores["physical"] + scores["temporal"]
              + perf_adj + scores["effort"] + scores["frustration"])
     return round(total / 6 * 10, 1)
 
-# ── 存結果 ─────────────────────────────────────────────────────────────────
-
-def save_to_supabase(record: dict):
-    supabase.table("experiment_results").insert(record).execute()
-
-def fetch_all_results() -> list[dict]:
-    res = supabase.table("experiment_results").select("*").order("created_at").execute()
-    return res.data or []
+# ── CSV 匯出 ───────────────────────────────────────────────────────────────
 
 def to_csv_bytes(rows: list[dict]) -> bytes:
     if not rows:
@@ -76,6 +49,7 @@ def init():
         "background": BACKGROUNDS[1],
         "done": set(),          # 已完成的 condition
         "page": "survey",       # survey | done | admin
+        "results": [],          # 所有已送出的結果（跨受試者累積）
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -88,7 +62,6 @@ init()
 def page_survey():
     st.title("3C 購物決策體驗評估")
 
-    # 研究說明
     with st.expander("📋 研究說明（點此展開）", expanded=False):
         st.markdown("""
 **研究目的**
@@ -107,7 +80,6 @@ def page_survey():
 
     st.divider()
 
-    # 受試者資料
     col1, col2 = st.columns(2)
     with col1:
         st.session_state.participant_id = st.text_input(
@@ -126,7 +98,6 @@ def page_survey():
 
     st.divider()
 
-    # 選擇填哪個 condition
     remaining = [c for c in CONDITIONS if c not in st.session_state.done]
 
     if not remaining:
@@ -142,7 +113,6 @@ def page_survey():
     st.caption(f"請根據剛才使用「**{condition}**」完成任務的真實感受評分。")
     st.divider()
 
-    # 6 個滑桿
     scores = {}
     for key, (label, desc) in DIMS.items():
         st.markdown(f"**{label}**")
@@ -170,7 +140,7 @@ def page_survey():
 
     if st.button("✅ 送出", type="primary", use_container_width=True):
         record = {
-            "created_at":     datetime.datetime.now().isoformat(),
+            "created_at":     datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "participant_id": st.session_state.participant_id,
             "background":     st.session_state.background,
             "condition":      condition,
@@ -182,7 +152,7 @@ def page_survey():
             "frustration":    scores["frustration"] * 10,
             "overall_raw":    overall,
         }
-        save_to_supabase(record)
+        st.session_state.results.append(record)
         st.session_state.done.add(condition)
         st.success(f"「{condition}」評估已儲存！")
         st.balloons()
@@ -195,8 +165,8 @@ def page_done():
     st.success("感謝您的參與！請通知實驗主持人。")
 
     if st.button("重新開始（下一位受試者）", use_container_width=True):
-        for k in ["participant_id", "done"]:
-            st.session_state[k] = "" if k == "participant_id" else set()
+        st.session_state.participant_id = ""
+        st.session_state.done = set()
         st.session_state.page = "survey"
         st.rerun()
 
@@ -205,9 +175,9 @@ def page_done():
 def page_admin():
     st.title("📊 實驗結果管理")
 
-    rows = fetch_all_results()
+    rows = st.session_state.results
     if not rows:
-        st.info("尚無資料")
+        st.info("尚無資料（資料僅在本次瀏覽器 session 內有效，請及時下載）")
         return
 
     st.dataframe(rows, use_container_width=True)
@@ -218,10 +188,10 @@ def page_admin():
         mime="text/csv",
         use_container_width=True,
     )
+    st.caption("⚠️ 關閉瀏覽器後資料會消失，請在實驗結束後立即下載。")
 
 # ── 路由 ───────────────────────────────────────────────────────────────────
 
-# 側欄導覽
 with st.sidebar:
     st.header("導覽")
     if st.button("📝 填寫問卷", use_container_width=True):
@@ -231,13 +201,16 @@ with st.sidebar:
         st.session_state.page = "admin"
         st.rerun()
 
-    done_count = len(st.session_state.done)
-    st.caption(f"已完成：{done_count} / 2 份")
+    st.divider()
+    done_count = len(st.session_state.results)
+    st.caption(f"已收錄筆數：{done_count}")
+
+    done_now = len(st.session_state.done)
+    st.caption(f"本位受試者：{done_now} / 2 份")
     for c in CONDITIONS:
         icon = "✅" if c in st.session_state.done else "⬜"
         st.caption(f"{icon} {c}")
 
-# 顯示對應頁面
 if st.session_state.page == "done":
     page_done()
 elif st.session_state.page == "admin":
