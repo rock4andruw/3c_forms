@@ -39,13 +39,20 @@ def fetch_all() -> list[dict]:
 
 CONDITIONS = ["傳統電商搜尋", "AI 智慧平台"]
 
+# (label, description, low_anchor, high_anchor)
 DIMS = {
-    "mental":      ("心智需求",  "完成任務需要多少腦力思考？（比對規格、在多頁面間查找資訊、判斷相容性）"),
-    "physical":    ("身體需求",  "完成任務需要多少體力？（反覆點擊、捲動頁面）"),
-    "temporal":    ("時間壓力",  "過程中您感受到多大的時間壓力或緊迫感？"),
-    "performance": ("決策信心",  "完成後對選出的配件清單有多少把握？（確信相容、不會買錯）"),
-    "effort":      ("努力程度",  "整體付出了多少心力與努力？"),
-    "frustration": ("挫折程度",  "過程中感到多少挫折感、煩躁或壓力？"),
+    "mental":      ("心智需求",  "完成任務需要多少腦力思考？（比對規格、查找資訊、判斷相容性）",
+                    "毫無思考負擔", "腦力負荷極重"),
+    "physical":    ("身體需求",  "完成任務需要多少體力？（反覆點擊、捲動頁面）",
+                    "幾乎不需動作", "動作極其繁瑣"),
+    "temporal":    ("時間壓力",  "過程中您感受到多大的時間壓力或緊迫感？",
+                    "完全不急迫",   "時間壓力極大"),
+    "performance": ("決策信心",  "完成後對選出的配件清單有多少把握？（確信相容、不會買錯）",
+                    "完全沒有把握", "非常有把握"),
+    "effort":      ("努力程度",  "整體付出了多少心力與努力？",
+                    "毫不費心",     "全力以赴"),
+    "frustration": ("挫折程度",  "過程中感到多少挫折感、煩躁或壓力？",
+                    "完全不挫折",   "極度沮喪煩躁"),
 }
 
 BACKGROUNDS = [
@@ -163,22 +170,27 @@ def page_survey():
     st.divider()
 
     scores = {}
-    for key, (label, desc) in DIMS.items():
+    for key, (label, desc, low, high) in DIMS.items():
         st.markdown(f"**{label}**")
         st.caption(desc)
+
+        col_low, col_slider, col_high = st.columns([2, 6, 2])
+        with col_low:
+            st.markdown(f"<div style='text-align:right; color:#888; padding-top:28px'>0<br>{low}</div>",
+                        unsafe_allow_html=True)
+        with col_slider:
+            val = st.slider(
+                label, 0, 10, 5, key=f"{condition}_{key}",
+                label_visibility="collapsed",
+            )
+        with col_high:
+            st.markdown(f"<div style='text-align:left; color:#888; padding-top:28px'>10<br>{high}</div>",
+                        unsafe_allow_html=True)
+
+        scores[key] = val
+
         if key == "performance":
-            scores[key] = st.slider(
-                label, 0, 10, 5, key=f"{condition}_{key}",
-                label_visibility="collapsed",
-                help="0 = 完全沒信心　10 = 非常有信心",
-            )
-            st.caption("*此題越高分代表越有信心（與其他題方向相反）*")
-        else:
-            scores[key] = st.slider(
-                label, 0, 10, 5, key=f"{condition}_{key}",
-                label_visibility="collapsed",
-                help="0 = 非常低　10 = 非常高",
-            )
+            st.caption("*此題越高分代表決策信心越高（與其他題方向相反）*")
         st.divider()
 
     overall = calc_overall(scores)
