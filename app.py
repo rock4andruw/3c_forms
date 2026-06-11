@@ -82,6 +82,8 @@ def init():
         "done": set(),
         "page": "survey",
         "admin_logged_in": False,
+        "show_next_prompt": False,
+        "last_submitted": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -92,6 +94,22 @@ init()
 # ── 頁面：問卷 ─────────────────────────────────────────────────────────────
 
 def page_survey():
+    # 過渡提示：第一份完成後，提醒去做第二個任務
+    if st.session_state.show_next_prompt:
+        remaining = [c for c in CONDITIONS if c not in st.session_state.done]
+        next_cond = remaining[0] if remaining else ""
+        st.success(f"✅ 「{st.session_state.last_submitted}」評估已儲存！")
+        st.divider()
+        st.subheader(f"接下來請完成「{next_cond}」的操作任務")
+        if next_cond == "AI 智慧平台":
+            st.info("請使用 AI 智慧平台，在 NT$30,000 預算內選出能執行《黑神話：悟空》的電腦配件清單（7 項零件）。完成後回到此頁填寫第二份評估。")
+        else:
+            st.info("請使用原價屋等傳統電商網站，在 NT$30,000 預算內選出能執行《黑神話：悟空》的電腦配件清單（7 項零件）。完成後回到此頁填寫第二份評估。")
+        if st.button(f"我已完成任務，填寫「{next_cond}」評估 →", type="primary", use_container_width=True):
+            st.session_state.show_next_prompt = False
+            st.rerun()
+        st.stop()
+
     st.title("3C 購物決策體驗評估")
 
     with st.expander("📋 研究說明（點此展開）", expanded=False):
@@ -183,7 +201,12 @@ def page_survey():
         try:
             save_to_sheet(record)
             st.session_state.done.add(condition)
-            st.success(f"「{condition}」評估已儲存！")
+            st.session_state.last_submitted = condition
+            remaining_after = [c for c in CONDITIONS if c not in st.session_state.done]
+            if remaining_after:
+                st.session_state.show_next_prompt = True
+            else:
+                st.session_state.page = "done"
             st.balloons()
             st.rerun()
         except Exception as e:
