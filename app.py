@@ -2,6 +2,38 @@ import io
 import csv
 import datetime
 import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
+
+# ── Google Sheets 連線 ─────────────────────────────────────────────────────
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+HEADER = [
+    "created_at", "participant_id", "background", "condition",
+    "mental", "physical", "temporal", "performance",
+    "effort", "frustration", "overall_raw",
+]
+
+@st.cache_resource
+def get_gspread_client():
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=SCOPES
+    )
+    return gspread.authorize(creds)
+
+def get_sheet():
+    client = get_gspread_client()
+    return client.open_by_key(st.secrets["SHEET_ID"]).sheet1
+
+def save_to_sheet(record: dict):
+    sheet = get_sheet()
+    if not sheet.row_values(1):
+        sheet.append_row(HEADER)
+    sheet.append_row([record[k] for k in HEADER])
+
+def fetch_all() -> list[dict]:
+    sheet = get_sheet()
+    return sheet.get_all_records()
 
 # ── 常數 ───────────────────────────────────────────────────────────────────
 
@@ -25,7 +57,7 @@ BACKGROUNDS = [
 # ── 計算 ───────────────────────────────────────────────────────────────────
 
 def calc_overall(scores: dict) -> float:
-    perf_adj = 10 - scores["performance"]   # 反向計分
+    perf_adj = 10 - scores["performance"]
     total = (scores["mental"] + scores["physical"] + scores["temporal"]
              + perf_adj + scores["effort"] + scores["frustration"])
     return round(total / 6 * 10, 1)
@@ -39,7 +71,7 @@ def to_csv_bytes(rows: list[dict]) -> bytes:
     writer = csv.DictWriter(buf, fieldnames=rows[0].keys())
     writer.writeheader()
     writer.writerows(rows)
-    return buf.getvalue().encode("utf-8-sig")  # utf-8-sig 讓 Excel 正確顯示中文
+    return buf.getvalue().encode("utf-8-sig")
 
 # ── Session 初始化 ─────────────────────────────────────────────────────────
 
@@ -47,9 +79,9 @@ def init():
     defaults = {
         "participant_id": "",
         "background": BACKGROUNDS[1],
-        "done": set(),          # 已完成的 condition
-        "page": "survey",       # survey | done | admin
-        "results": [],          # 所有已送出的結果（跨受試者累積）
+        "done": set(),
+        "page": "survey",
+        "admin_logged_in": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -99,7 +131,6 @@ def page_survey():
     st.divider()
 
     remaining = [c for c in CONDITIONS if c not in st.session_state.done]
-
     if not remaining:
         st.session_state.page = "done"
         st.rerun()
@@ -117,19 +148,16 @@ def page_survey():
     for key, (label, desc) in DIMS.items():
         st.markdown(f"**{label}**")
         st.caption(desc)
-
         if key == "performance":
             scores[key] = st.slider(
-                label, 0, 10, 5,
-                key=f"{condition}_{key}",
+                label, 0, 10, 5, key=f"{condition}_{key}",
                 label_visibility="collapsed",
                 help="0 = 完全沒信心　10 = 非常有信心",
             )
             st.caption("*此題越高分代表越有信心（與其他題方向相反）*")
         else:
             scores[key] = st.slider(
-                label, 0, 10, 5,
-                key=f"{condition}_{key}",
+                label, 0, 10, 5, key=f"{condition}_{key}",
                 label_visibility="collapsed",
                 help="0 = 非常低　10 = 非常高",
             )
@@ -152,59 +180,107 @@ def page_survey():
             "frustration":    scores["frustration"] * 10,
             "overall_raw":    overall,
         }
-        st.session_state.results.append(record)
-        st.session_state.done.add(condition)
-        st.success(f"「{condition}」評估已儲存！")
-        st.balloons()
-        st.rerun()
+        try:
+            save_to_sheet(record)
+            st.session_state.done.add(condition)
+            st.success(f"「{condition}」評估已儲存！")
+            st.balloons()
+            st.rerun()
+        except Exception as e:
+            st.error(f"儲存失敗：{e}")
 
 # ── 頁面：完成 ─────────────────────────────────────────────────────────────
 
 def page_done():
     st.title("🎉 兩份評估均已完成")
     st.success("感謝您的參與！請通知實驗主持人。")
-
     if st.button("重新開始（下一位受試者）", use_container_width=True):
         st.session_state.participant_id = ""
         st.session_state.done = set()
         st.session_state.page = "survey"
         st.rerun()
 
-# ── 頁面：管理（下載結果） ─────────────────────────────────────────────────
+# ── 頁面：管理員登入 ────────────────────────────────────────────────────────
+
+def page_login():
+    st.title("🔐 管理員登入")
+    st.caption("此頁面僅供實驗主持人使用")
+    with st.form("login_form"):
+        pwd = st.text_input("密碼", type="password", placeholder="輸入管理員密碼")
+        submitted = st.form_submit_button("登入", use_container_width=True)
+    if submitted:
+        if pwd == st.secrets.get("ADMIN_PASSWORD", ""):
+            st.session_state.admin_logged_in = True
+            st.rerun()
+        else:
+            st.error("密碼錯誤，請再試一次。")
+
+# ── 頁面：管理後台 ─────────────────────────────────────────────────────────
 
 def page_admin():
-    st.title("📊 實驗結果管理")
-
-    rows = st.session_state.results
-    if not rows:
-        st.info("尚無資料（資料僅在本次瀏覽器 session 內有效，請及時下載）")
+    if not st.session_state.admin_logged_in:
+        page_login()
         return
 
-    st.dataframe(rows, use_container_width=True)
+    st.title("📊 實驗結果後台")
+
+    col_refresh, col_logout = st.columns([3, 1])
+    with col_refresh:
+        if st.button("🔄 重新整理", use_container_width=True):
+            st.rerun()
+    with col_logout:
+        if st.button("登出", use_container_width=True):
+            st.session_state.admin_logged_in = False
+            st.rerun()
+
+    st.divider()
+
+    try:
+        rows = fetch_all()
+    except Exception as e:
+        st.error(f"讀取失敗：{e}")
+        return
+
+    if not rows:
+        st.info("尚無資料")
+        return
+
+    # 統計摘要
+    counts: dict[str, int] = {}
+    for r in rows:
+        c = r.get("condition", "")
+        counts[c] = counts.get(c, 0) + 1
+
+    summary_cols = st.columns(len(counts) + 1)
+    summary_cols[0].metric("總筆數", len(rows))
+    for i, (cond, cnt) in enumerate(counts.items()):
+        summary_cols[i + 1].metric(cond, cnt)
+
+    st.divider()
+    st.subheader("所有填答記錄")
+    st.dataframe(rows, use_container_width=True, height=400)
+
     st.download_button(
-        "⬇️ 下載 CSV",
+        "⬇️ 下載完整 CSV",
         data=to_csv_bytes(rows),
         file_name=f"nasa_tlx_results_{datetime.date.today()}.csv",
         mime="text/csv",
         use_container_width=True,
+        type="primary",
     )
-    st.caption("⚠️ 關閉瀏覽器後資料會消失，請在實驗結束後立即下載。")
 
-# ── 路由 ───────────────────────────────────────────────────────────────────
+# ── 側欄 + 路由 ────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.header("導覽")
     if st.button("📝 填寫問卷", use_container_width=True):
         st.session_state.page = "survey"
         st.rerun()
-    if st.button("📊 下載結果", use_container_width=True):
+    if st.button("🔐 管理後台", use_container_width=True):
         st.session_state.page = "admin"
         st.rerun()
 
     st.divider()
-    done_count = len(st.session_state.results)
-    st.caption(f"已收錄筆數：{done_count}")
-
     done_now = len(st.session_state.done)
     st.caption(f"本位受試者：{done_now} / 2 份")
     for c in CONDITIONS:
